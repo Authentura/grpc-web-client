@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod call;
 
 use bytes::Bytes;
@@ -7,11 +9,15 @@ use core::{
     task::{Context, Poll},
 };
 use futures::{Future, Stream, TryStreamExt};
-use http::{header::HeaderName, request::Request, response::Response, HeaderMap, HeaderValue};
-use http_body::Body;
+use http::{
+    header::HeaderName, request::Request, response::Response, HeaderMap, HeaderValue,
+};
+use http_body::{combinators::UnsyncBoxBody, Body};
 use js_sys::{Array, Uint8Array};
 use std::{error::Error, pin::Pin};
-use tonic::{body::BoxBody, client::GrpcService, Status};
+use tonic::{body::BoxBody, Status};
+use tower::Service;
+use tracing::info;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use wasm_streams::ReadableStream;
@@ -25,9 +31,7 @@ pub enum ClientError {
 
 impl Error for ClientError {}
 impl fmt::Display for ClientError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{:?}", self) }
 }
 
 pub type CredentialsMode = web_sys::RequestCredentials;
@@ -52,7 +56,10 @@ impl Client {
         }
     }
 
-    async fn request(self, rpc: Request<BoxBody>) -> Result<Response<BoxBody>, ClientError> {
+    async fn request(
+        self,
+        rpc: Request<BoxBody>,
+    ) -> Result<Response<UnsyncBoxBody<Bytes, Status>>, ClientError> {
         let mut uri = rpc.uri().to_string();
         uri.insert_str(0, &self.base_uri);
 
@@ -63,7 +70,7 @@ impl Client {
         headers.set("x-user-agent", "grpc-web-rust/0.1").unwrap();
         headers.set("x-grpc-web", "1").unwrap();
         headers
-            .set("content-type", self.encoding.to_content_type())
+            .set("content-type", self.encoding.as_content_type())
             .unwrap();
 
         let body_bytes = hyper::body::to_bytes(rpc.into_body()).await.unwrap();
@@ -94,25 +101,32 @@ impl Client {
         {
             let pair: Array = kv.unwrap().into();
             headers.append(
-                HeaderName::from_bytes(pair.get(0).as_string().unwrap().as_bytes()).unwrap(),
+                HeaderName::from_bytes(pair.get(0).as_string().unwrap().as_bytes())
+                    .unwrap(),
                 HeaderValue::from_str(&pair.get(1).as_string().unwrap()).unwrap(),
             );
         }
 
-        let body_stream = ReadableStream::from_raw(fetch_res.body().unwrap().unchecked_into());
+        let body_stream =
+            ReadableStream::from_raw(fetch_res.body().unwrap().unchecked_into());
         let body = GrpcWebCall::client_response(
             ReadableStreamBody::new(body_stream),
             Encoding::from_content_type(headers),
         );
 
-        Ok(res.body(BoxBody::new(body)).unwrap())
+        let body = res.body(BoxBody::new(body));
+
+        match body {
+            Ok(body) => Ok(body),
+            Err(_) => Err(ClientError::Err),
+        }
     }
 }
 
-impl GrpcService<BoxBody> for Client {
-    type ResponseBody = BoxBody;
+impl Service<Request<BoxBody>> for Client {
+    type Response = Response<UnsyncBoxBody<Bytes, Status>>;
     type Error = ClientError;
-    type Future = Pin<Box<dyn Future<Output = Result<Response<BoxBody>, ClientError>>>>;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -164,13 +178,12 @@ impl Body for ReadableStreamBody {
         Poll::Ready(Ok(None))
     }
 
-    fn is_end_stream(&self) -> bool {
-        false
-    }
+    fn is_end_stream(&self) -> bool { false }
 }
 
-// WARNING: these are required to satisfy the Body and Error traits, but JsValue is not thread-safe.
-// This shouldn't be an issue because wasm doesn't have threads currently.
+// WARNING: these are required to satisfy the Body and Error traits, but JsValue
+// is not thread-safe. This shouldn't be an issue because wasm doesn't have
+// threads currently.
 
 unsafe impl Sync for ReadableStreamBody {}
 unsafe impl Send for ReadableStreamBody {}

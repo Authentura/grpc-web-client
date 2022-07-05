@@ -1,9 +1,12 @@
 // This file is based on https://github.com/alce/tonic/blob/86bbb1d5a4844882dec81bef7c1a554bd9464adf/tonic-web/tonic-web/src/call.rs
 
-use std::mem;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::{convert::TryInto, error::Error};
+use std::{
+    convert::TryInto,
+    error::Error,
+    mem,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use byteorder::{BigEndian, ByteOrder};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -28,7 +31,10 @@ pub(crate) mod content_types {
     pub(crate) fn is_grpc_web(headers: &HeaderMap) -> bool {
         matches!(
             content_type(headers),
-            Some(GRPC_WEB) | Some(GRPC_WEB_PROTO) | Some(GRPC_WEB_TEXT) | Some(GRPC_WEB_TEXT_PROTO)
+            Some(GRPC_WEB)
+                | Some(GRPC_WEB_PROTO)
+                | Some(GRPC_WEB_TEXT)
+                | Some(GRPC_WEB_TEXT_PROTO)
         )
     }
 
@@ -51,7 +57,7 @@ enum Mode {
     Encode,
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Encoding {
     None,
     Base64,
@@ -111,7 +117,9 @@ where
                 (Mode::Encode, Encoding::Base64) => BUFFER_SIZE,
                 _ => 0,
             }),
-            header_buf: BytesMut::with_capacity(if decode_trailers { HEADER_SIZE } else { 0 }),
+            header_buf: BytesMut::with_capacity(
+                if decode_trailers { HEADER_SIZE } else { 0 },
+            ),
             mode,
             encoding,
             poll_trailers,
@@ -122,9 +130,7 @@ where
     }
 
     #[inline]
-    fn max_decodable(&self) -> usize {
-        (self.buf.len() / 4) * 4
-    }
+    fn max_decodable(&self) -> usize { (self.buf.len() / 4) * 4 }
 
     fn decode_chunk(&mut self) -> Result<Option<Bytes>, Status> {
         // not enough bytes to decode
@@ -139,7 +145,8 @@ where
             .map_err(internal_error)
     }
 
-    // Key-value pairs encoded as a HTTP/1 headers block (without the terminating newline)
+    // Key-value pairs encoded as a HTTP/1 headers block (without the terminating
+    // newline)
     fn encode_trailers(&self, trailers: HeaderMap) -> Vec<u8> {
         trailers.iter().fold(Vec::new(), |mut acc, (key, value)| {
             acc.put_slice(key.as_ref());
@@ -212,7 +219,7 @@ where
                     } else {
                         self.state = State::ReadData(frame_len);
                     }
-                }
+                },
                 State::ReadData(remaining) => {
                     let buf_remaining = bytes.len() - curr_idx;
                     if buf_remaining < remaining {
@@ -222,10 +229,11 @@ where
                         self.state = State::ReadHeader(HEADER_SIZE);
                         curr_idx += remaining;
                     }
-                }
+                },
                 State::ReadTrailers(remaining) => {
                     if curr_idx == 0 {
-                        // if we just read a header, then the return_len is already correct, otherwise zero it out.
+                        // if we just read a header, then the return_len is already
+                        // correct, otherwise zero it out.
                         return_len = 0;
                     }
 
@@ -239,7 +247,8 @@ where
 
                     self.header_buf
                         .extend_from_slice(&bytes[curr_idx..curr_idx + remaining]);
-                    let mut header_bytes = mem::replace(&mut self.header_buf, BytesMut::new());
+                    let mut header_bytes =
+                        mem::replace(&mut self.header_buf, BytesMut::new());
 
                     let mut trailers = [httparse::EMPTY_HEADER; 64];
                     header_bytes.extend_from_slice(b"\n"); // parse_headers returns Status::Partial without this
@@ -257,8 +266,8 @@ where
                     }
 
                     self.state = State::Done;
-                }
-                State::Done => {}
+                },
+                State::Done => {},
             }
         }
     }
@@ -276,19 +285,22 @@ where
         match self.encoding {
             Encoding::Base64 => loop {
                 if let Some(bytes) = self.decode_chunk()? {
-                    return Poll::Ready(Some(self.handle_frames(bytes).map_err(internal_error)));
+                    return Poll::Ready(Some(
+                        self.handle_frames(bytes).map_err(internal_error),
+                    ));
                 }
 
                 match ready!(Pin::new(&mut self.inner).poll_data(cx)) {
                     Some(Ok(data)) => self.buf.put(data),
                     Some(Err(e)) => return Poll::Ready(Some(Err(internal_error(e)))),
-                    None => {
+                    None =>
                         return if self.buf.has_remaining() {
-                            Poll::Ready(Some(Err(internal_error("malformed base64 request"))))
+                            Poll::Ready(Some(Err(internal_error(
+                                "malformed base64 request",
+                            ))))
                         } else {
                             Poll::Ready(None)
-                        }
-                    }
+                        },
                 }
             },
 
@@ -327,7 +339,7 @@ where
 
                     self.poll_trailers = false;
                     Poll::Ready(Some(Ok(frame.into())))
-                }
+                },
                 Ok(None) => Poll::Ready(None),
                 Err(e) => Poll::Ready(Some(Err(internal_error(e)))),
             };
@@ -364,22 +376,20 @@ where
         }
         loop {
             if self.state == State::Done {
-                return Poll::Ready(Ok(Some(mem::replace(&mut self.trailers, HeaderMap::new()))));
+                return Poll::Ready(Ok(Some(mem::replace(
+                    &mut self.trailers,
+                    HeaderMap::new(),
+                ))));
             }
-            match ready!(self.as_mut().poll_decode(cx)) {
-                Some(Err(e)) => return Poll::Ready(Err(e)),
-                _ => {}
+            if let Some(Err(e)) = ready!(self.as_mut().poll_decode(cx)) {
+                return Poll::Ready(Err(e));
             };
         }
     }
 
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
-    }
+    fn is_end_stream(&self) -> bool { self.inner.is_end_stream() }
 
-    fn size_hint(&self) -> SizeHint {
-        self.inner.size_hint()
-    }
+    fn size_hint(&self) -> SizeHint { self.inner.size_hint() }
 }
 
 impl<B> Stream for GrpcWebCall<B>
@@ -403,7 +413,7 @@ impl Encoding {
         Self::from_header(headers.get(header::ACCEPT))
     }
 
-    pub(crate) fn to_content_type(&self) -> &'static str {
+    pub(crate) fn as_content_type(&self) -> &'static str {
         match self {
             Encoding::Base64 => GRPC_WEB_TEXT_PROTO,
             Encoding::None => GRPC_WEB_PROTO,
@@ -418,9 +428,7 @@ impl Encoding {
     }
 }
 
-fn internal_error(e: impl std::fmt::Display) -> Status {
-    Status::internal(e.to_string())
-}
+fn internal_error(e: impl std::fmt::Display) -> Status { Status::internal(e.to_string()) }
 
 #[cfg(test)]
 mod tests {
